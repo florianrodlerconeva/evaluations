@@ -1,26 +1,26 @@
 # The directory Mix will write compiled artifacts to.
-/_build/
+**/_build/
 
 # If you run "mix test --cover", coverage assets end up here.
-/cover/
+**/cover/
 
 # The directory Mix downloads your dependencies sources to.
-/deps/
+**/deps/
 
 # Where third-party dependencies like ExGuard store their generated files.
-/.iex.exs
+**/.iex.exs
 
 # Ignore .fetch files in case you like to edit your project deps locally.
-/.fetch
+**/.fetch
 
 # If the VM crashes, it generates a dump, let's ignore it too.
-erl_crash.dump
+**/erl_crash.dump
 
 # Also ignore archive artifacts (built via "mix archive.build").
-*.ez
+**/*.ez
 
 # Temporary files, for example, from tests.
-/tmp/
+**/tmp/
 
 # Payload dumps written by the app.
-/telemetry_payloads.log
+**/telemetry_payloads.log
