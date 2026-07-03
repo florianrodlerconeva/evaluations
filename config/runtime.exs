@@ -53,8 +53,20 @@ config :kafka_ex, brokers: brokers
 # Target topic that processed messages are (stub-)published to.
 target_topic = System.get_env("KAFKA_TARGET_TOPIC", "device-telemetry-processed")
 
+# File that message headers/payloads are written to (payloads are kept off the
+# console so it can be used to watch progress).
+payload_file = System.get_env("KAFKA_PAYLOAD_FILE", "telemetry_payloads.log")
+
 config :kafka_telemetry_logger,
   topic: topic,
   consumer_group: consumer_group,
   auto_offset_reset: start_from,
-  target_topic: target_topic
+  target_topic: target_topic,
+  payload_file: payload_file
+
+# Optional override for the KafkaEx fetch size (bytes per fetch). Bigger fetches
+# amortise the per-fetch round-trip, which is the main throughput lever for a
+# single-partition topic. Defaults to the value in config/config.exs.
+if max_bytes = System.get_env("KAFKA_FETCH_MAX_BYTES") do
+  config :kafka_telemetry_logger, fetch_max_bytes: String.to_integer(max_bytes)
+end

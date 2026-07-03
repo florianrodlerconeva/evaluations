@@ -11,11 +11,15 @@ defmodule KafkaTelemetryLogger.PipelineTest do
 
   alias KafkaEx.Messages.Fetch.Record
   alias KafkaEx.Messages.Header
-  alias KafkaTelemetryLogger.{Pipeline, Producer}
+  alias KafkaTelemetryLogger.{PayloadWriter, Pipeline, Producer}
 
   setup do
+    tmp = Path.join(System.tmp_dir!(), "kafka_payloads_#{System.unique_integer([:positive])}.log")
+    # The writer must be up before the pipeline processes any message.
+    start_supervised!({PayloadWriter, path: tmp})
     start_supervised!(Pipeline)
-    :ok
+    on_exit(fn -> File.rm(tmp) end)
+    {:ok, payload_file: tmp}
   end
 
   defp record(offset, opts \\ []) do
@@ -34,6 +38,20 @@ defmodule KafkaTelemetryLogger.PipelineTest do
     Producer.deliver([record(1), record(2)], ref, self())
 
     assert_receive {:batch_complete, ^ref, :ok}, 5_000
+  end
+
+  test "writes headers and payload to the file", %{payload_file: file} do
+    ref = make_ref()
+    Producer.deliver([record(7, value: ~s({"k":"v"}))], ref, self())
+    assert_receive {:batch_complete, ^ref, :ok}, 5_000
+
+    # Stopping the writer flushes and closes the (delayed-write) file.
+    stop_supervised!(PayloadWriter)
+    contents = File.read!(file)
+
+    assert contents =~ "offset=7"
+    assert contents =~ ~s(payload={"k":"v"})
+    assert contents =~ "message_type=data_point"
   end
 
   test "empty batches complete immediately" do

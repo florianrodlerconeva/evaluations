@@ -15,7 +15,7 @@ defmodule KafkaTelemetryLogger.Application do
 
   require Logger
 
-  alias KafkaTelemetryLogger.{Pipeline, TelemetryConsumer}
+  alias KafkaTelemetryLogger.{PayloadWriter, Pipeline, TelemetryConsumer}
 
   @impl true
   def start(_type, _args) do
@@ -34,14 +34,20 @@ defmodule KafkaTelemetryLogger.Application do
     auto_offset_reset =
       Application.get_env(:kafka_telemetry_logger, :auto_offset_reset, :earliest)
 
+    # Larger fetches mean far fewer fetch/process/commit cycles when reading a
+    # backlog (the default is only 1 MB, ~a handful of large telemetry messages).
+    fetch_max_bytes = Application.get_env(:kafka_telemetry_logger, :fetch_max_bytes, 10_000_000)
+
     Logger.info(
       "Starting device telemetry consumer: topic=#{topic} " <>
         "group=#{consumer_group} start_from=#{auto_offset_reset}"
     )
 
     children = [
-      # Start the Broadway pipeline first so its producer is ready to receive
-      # batches from the consumer.
+      # The payload writer must be up before the pipeline processes messages.
+      PayloadWriter,
+      # Start the Broadway pipeline before the consumer so its producer is ready
+      # to receive batches.
       Pipeline,
       %{
         id: KafkaEx.Consumer.ConsumerGroup,
@@ -55,11 +61,13 @@ defmodule KafkaTelemetryLogger.Application do
              # spawned consumers. Read from the earliest offset by default since
              # this is an ephemeral group with no committed offsets.
              #
-             # commit_interval is set high because commits are driven explicitly
-             # (sync_commit) once Broadway acknowledges each batch.
+             # Commits are async (batched every commit_interval) but only ever
+             # cover offsets Broadway has already acknowledged. Larger fetches
+             # amortise the per-cycle overhead when catching up on a backlog.
              [
                auto_offset_reset: auto_offset_reset,
-               commit_interval: 5_000
+               commit_interval: 5_000,
+               fetch_options: [max_bytes: fetch_max_bytes]
              ]
            ]},
         type: :supervisor

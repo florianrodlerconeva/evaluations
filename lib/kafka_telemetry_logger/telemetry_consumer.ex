@@ -9,9 +9,14 @@ defmodule KafkaTelemetryLogger.TelemetryConsumer do
   hands the batch to `KafkaTelemetryLogger.Producer` and then **blocks** until
   Broadway acknowledges every message in that batch:
 
-    * all messages acked successfully -> `{:sync_commit, state}` (commit)
+    * all messages acked successfully -> `{:async_commit, state}` (commit)
     * any message failed              -> raise, so nothing is committed and the
       batch is re-fetched and reprocessed (let-it-crash)
+
+  `:async_commit` still only commits offsets we have fully processed (the
+  consumer's acked offset only advances once this callback returns), but it lets
+  KafkaEx batch the commits (every `commit_interval`) instead of doing a broker
+  round-trip on every fetch — a large throughput win when reading a backlog.
 
   Blocking here also provides natural backpressure: KafkaEx will not fetch the
   next batch until the current one has drained through Broadway.
@@ -36,7 +41,7 @@ defmodule KafkaTelemetryLogger.TelemetryConsumer do
 
     receive do
       {:batch_complete, ^ref, :ok} ->
-        {:sync_commit, state}
+        {:async_commit, state}
 
       {:batch_complete, ^ref, :error} ->
         raise "Broadway failed to process batch #{inspect(ref)}; " <>

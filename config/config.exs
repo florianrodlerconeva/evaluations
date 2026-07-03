@@ -28,10 +28,21 @@ config :kafka_telemetry_logger, start_consumer: true
 # partition) feed a single producer; downstream parallelism is governed by
 # these stage concurrencies, and `partition_by` keeps per-partition ordering.
 # Raise the concurrencies to scale throughput with your partition count.
+#
+# batch_timeout is small: because the consumer blocks per fetched batch, the
+# batcher never fills to batch_size across fetches, so a large timeout would
+# stall every cycle for its full duration.
 config :kafka_telemetry_logger, KafkaTelemetryLogger.Pipeline,
   processor_concurrency: 4,
   batcher_concurrency: 2,
   batch_size: 100,
-  batch_timeout: 1_000
+  batch_timeout: 100
+
+# Max bytes per KafkaEx fetch. Bigger = fewer fetch/process/commit cycles when
+# catching up on a backlog (default in KafkaEx is only 1 MB).
+config :kafka_telemetry_logger, fetch_max_bytes: 10_000_000
+
+# How often the payload writer logs throughput (messages/second) to the console.
+config :kafka_telemetry_logger, progress_interval_ms: 2_000
 
 import_config "#{config_env()}.exs"

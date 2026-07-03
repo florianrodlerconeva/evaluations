@@ -41,8 +41,12 @@ KafkaEx GenConsumer ──deliver batch (ref)──▶ Producer (GenStage)
 - **`KafkaTelemetryLogger.Acknowledger`** — a `Broadway.Acknowledger` that routes
   per-message ack results back to the producer.
 - **`KafkaTelemetryLogger.Pipeline`** — the `Broadway` pipeline. `handle_message/3`
-  logs headers + payload; `handle_batch/4` publishes the batch via the target
-  producer.
+  writes each message's headers + payload to a file; `handle_batch/4` publishes
+  the batch via the target producer.
+- **`KafkaTelemetryLogger.PayloadWriter`** — a single process that writes headers
+  + payloads to a file (buffered) and logs throughput (messages/second) to the
+  console. Payloads are kept off the console so it stays readable and fast, and
+  the console can be used to watch progress.
 - **`KafkaTelemetryLogger.TargetProducer`** — a **stub** that pretends to publish
   to the target Kafka topic (it just logs and returns `:ok`; it does not talk to
   Kafka). Replace `publish/1` with a real producer to make it live.
@@ -110,16 +114,44 @@ mix run --no-halt
 
 You should see log lines like:
 
+Payloads go to a file (see below); the **console shows only progress**: startup,
+per-batch publishes, and a throughput meter:
+
 ```
-12:31:46.954 [info] Starting device telemetry consumer: topic=event-hub-device-telemetry-evh-cev-dev-device-telemetry group=kafka-telemetry-logger-6adcee67 start_from=earliest
-12:31:50.768 [info] Kafka message [partition=0 offset=65350]
-  headers: message_type=charger_report:v1.0.0, device_id=coneva-de-munich-80336-005, iothub-enqueuedtime=gwAAAZ8AYbIW, ...
-  payload: {"report:charger:active:energy:+":[...]}
-12:31:51.771 [info] [target-producer stub] published 26 message(s) to device-telemetry-processed
+13:11:33.906 [info] Starting device telemetry consumer: topic=event-hub-device-telemetry-... start_from=earliest
+13:11:33.911 [info] Writing message payloads to /.../telemetry_payloads.log
+13:11:38.505 [info] [target-producer stub] published 100 message(s) to device-telemetry-processed
+13:11:39.914 [info] consumed 536 messages (268/s)
+13:11:41.914 [info] consumed 1082 messages (273/s)
+```
+
+The payload file (`telemetry_payloads.log` by default) gets one line per message:
+
+```
+[partition=0 offset=65350]	headers=message_type=charger_report:v1.0.0, device_id=..., iothub-enqueuedtime=gwAAAZ8AYbIW, ...	payload={"report:charger:active:energy:+":[...]}
 ```
 
 (`iothub-enqueuedtime` is a binary timestamp header, so it shows up base64-encoded
 — matching the notebook.)
+
+## Throughput & tuning
+
+Reading a topic from the start goes only as fast as the fetch → process →
+commit cycle allows. The defaults are tuned for catching up on a backlog:
+
+- **`fetch_max_bytes`** (default 10 MB; KafkaEx's default is only 1 MB) — the
+  biggest lever for a **single-partition** topic, where there's one consumer and
+  one fetch in flight at a time. Bigger fetches amortise the per-fetch
+  round-trip. Override per run with `KAFKA_FETCH_MAX_BYTES`.
+- **`batch_timeout`** is small (100 ms) — since the consumer blocks per fetched
+  batch, a large batcher timeout would stall every cycle for its full duration.
+- **`:async_commit`** batches offset commits (every `commit_interval`) instead of
+  a broker round-trip per batch, while still only committing processed offsets.
+- Payloads are written to a **file**, not the console — logging large payloads to
+  the console is itself a major bottleneck.
+
+For a multi-partition topic, throughput also scales with the number of consumers
+(one per partition) and the processor/batcher concurrency.
 
 ## Configuration
 
@@ -132,6 +164,9 @@ environment variables:
 | `KAFKA_TOPIC`           | `event-hub-device-telemetry-evh-cev-dev-device-telemetry`     | Topic to consume                             |
 | `KAFKA_START_FROM`      | `earliest`                                                     | `earliest` or `latest`                       |
 | `KAFKA_CONSUMER_GROUP`  | `kafka-telemetry-logger-<random>`                             | Consumer group id (ephemeral by default)     |
+| `KAFKA_TARGET_TOPIC`    | `device-telemetry-processed`                                  | Topic the (stub) publisher targets           |
+| `KAFKA_PAYLOAD_FILE`    | `telemetry_payloads.log`                                      | File that headers/payloads are written to    |
+| `KAFKA_FETCH_MAX_BYTES` | `10000000`                                                    | Bytes per KafkaEx fetch (throughput lever)   |
 
 Example:
 
@@ -177,24 +212,20 @@ The pipeline tests drive the real Broadway topology by delivering batches to the
 producer and asserting on the `{:batch_complete, ref, :ok | :error}` signal that
 gates the source-offset commit.
 
-## Configuration (target topic)
-
-| Variable             | Default                      | Description                          |
-| -------------------- | ---------------------------- | ------------------------------------ |
-| `KAFKA_TARGET_TOPIC` | `device-telemetry-processed` | Topic the (stub) publisher targets   |
-
 ## Layout
 
 - `lib/kafka_telemetry_logger/application.ex` — supervision tree; starts the
-  Broadway pipeline and then the KafkaEx consumer group.
+  payload writer, the Broadway pipeline, and then the KafkaEx consumer group.
 - `lib/kafka_telemetry_logger/telemetry_consumer.ex` — `GenConsumer` that feeds
   batches into Broadway and commits offsets once Broadway acknowledges them.
 - `lib/kafka_telemetry_logger/producer.ex` — GenStage producer bridging KafkaEx
   into Broadway.
 - `lib/kafka_telemetry_logger/acknowledger.ex` — `Broadway.Acknowledger` routing
   acks back to the producer.
-- `lib/kafka_telemetry_logger/pipeline.ex` — Broadway pipeline: logs headers +
-  payload and publishes to the target topic.
+- `lib/kafka_telemetry_logger/pipeline.ex` — Broadway pipeline: writes headers +
+  payload to a file and publishes to the target topic.
+- `lib/kafka_telemetry_logger/payload_writer.ex` — writes payloads to a file and
+  logs throughput to the console.
 - `lib/kafka_telemetry_logger/target_producer.ex` — stub publisher for the target
   topic.
 - `lib/kafka_telemetry_logger/decoder.ex` — value/header decoding.

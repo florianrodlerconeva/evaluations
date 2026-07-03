@@ -2,8 +2,8 @@ defmodule KafkaTelemetryLogger.Pipeline do
   @moduledoc """
   The Broadway pipeline.
 
-  * `handle_message/3` logs each message's headers and payload (the original
-    behaviour of the app).
+  * `handle_message/3` writes each message's headers and payload to a file (via
+    `KafkaTelemetryLogger.PayloadWriter`) to keep large payloads off the console.
   * `handle_batch/4` forwards the batch to the target Kafka topic via
     `KafkaTelemetryLogger.TargetProducer` (a stub).
 
@@ -18,7 +18,7 @@ defmodule KafkaTelemetryLogger.Pipeline do
   require Logger
 
   alias Broadway.Message
-  alias KafkaTelemetryLogger.{Decoder, Producer, TargetProducer}
+  alias KafkaTelemetryLogger.{Decoder, PayloadWriter, Producer, TargetProducer}
 
   def start_link(_opts) do
     config = Application.get_env(:kafka_telemetry_logger, __MODULE__, [])
@@ -59,14 +59,12 @@ defmodule KafkaTelemetryLogger.Pipeline do
 
   @impl true
   def handle_message(_processor, %Message{data: record} = message, _context) do
-    headers = Decoder.decode_headers(record.headers)
-    payload = Decoder.decode_value(record.value)
-
-    Logger.info("""
-    Kafka message [partition=#{record.partition} offset=#{record.offset}]
-      headers: #{format_headers(headers)}
-      payload: #{payload}\
-    """)
+    PayloadWriter.write(%{
+      partition: record.partition,
+      offset: record.offset,
+      headers: Decoder.decode_headers(record.headers),
+      payload: Decoder.decode_value(record.value)
+    })
 
     message
   end
@@ -85,13 +83,5 @@ defmodule KafkaTelemetryLogger.Pipeline do
         Logger.error("Failed to publish batch to target topic: #{inspect(reason)}")
         Enum.map(messages, &Message.failed(&1, reason))
     end
-  end
-
-  defp format_headers(headers) when map_size(headers) == 0, do: "(none)"
-
-  defp format_headers(headers) do
-    headers
-    |> Enum.map(fn {key, value} -> "#{key}=#{value}" end)
-    |> Enum.join(", ")
   end
 end
