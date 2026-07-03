@@ -1,39 +1,50 @@
 defmodule KafkaTelemetryLogger.TelemetryConsumer do
   @moduledoc """
-  A `KafkaEx.Consumer.GenConsumer` that logs the headers and payload of every
-  message it consumes from the device telemetry topic.
+  A `KafkaEx.Consumer.GenConsumer` that feeds fetched messages into the Broadway
+  pipeline and lets Broadway drive offset commits.
+
+  KafkaEx is push-based and only supports `:async_commit`/`:sync_commit` return
+  values (there is no "don't commit"). To commit *only* after messages have been
+  fully processed and published to the target topic, `handle_message_set/2`
+  hands the batch to `KafkaTelemetryLogger.Producer` and then **blocks** until
+  Broadway acknowledges every message in that batch:
+
+    * all messages acked successfully -> `{:sync_commit, state}` (commit)
+    * any message failed              -> raise, so nothing is committed and the
+      batch is re-fetched and reprocessed (let-it-crash)
+
+  Blocking here also provides natural backpressure: KafkaEx will not fetch the
+  next batch until the current one has drained through Broadway.
   """
 
   use KafkaEx.Consumer.GenConsumer
 
   require Logger
 
-  alias KafkaEx.Messages.Fetch.Record
-  alias KafkaTelemetryLogger.Decoder
+  alias KafkaTelemetryLogger.Producer
+
+  # How long to wait for Broadway to finish a batch before giving up (and
+  # crashing, which triggers a reprocess from the last committed offset).
+  @ack_timeout 60_000
 
   @impl true
+  def handle_message_set([], state), do: {:async_commit, state}
+
   def handle_message_set(message_set, state) do
-    Enum.each(message_set, &log_message/1)
-    # Commit asynchronously; we only care about reading and logging.
-    {:async_commit, state}
-  end
+    ref = make_ref()
+    Producer.deliver(message_set, ref, self())
 
-  defp log_message(%Record{} = record) do
-    headers = Decoder.decode_headers(record.headers)
-    payload = Decoder.decode_value(record.value)
+    receive do
+      {:batch_complete, ^ref, :ok} ->
+        {:sync_commit, state}
 
-    Logger.info("""
-    Kafka message [partition=#{record.partition} offset=#{record.offset}]
-      headers: #{format_headers(headers)}
-      payload: #{payload}\
-    """)
-  end
-
-  defp format_headers(headers) when map_size(headers) == 0, do: "(none)"
-
-  defp format_headers(headers) do
-    headers
-    |> Enum.map(fn {key, value} -> "#{key}=#{value}" end)
-    |> Enum.join(", ")
+      {:batch_complete, ^ref, :error} ->
+        raise "Broadway failed to process batch #{inspect(ref)}; " <>
+                "not committing offsets so the batch will be reprocessed"
+    after
+      @ack_timeout ->
+        raise "Timed out after #{@ack_timeout}ms waiting for Broadway to " <>
+                "process batch #{inspect(ref)}"
+    end
   end
 end

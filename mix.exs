@@ -22,7 +22,8 @@ defmodule KafkaTelemetryLogger.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:kafka_ex, "~> 1.0"}
+      {:kafka_ex, "~> 1.0"},
+      {:broadway, "~> 1.0"}
     ]
   end
 end

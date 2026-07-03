@@ -50,7 +50,11 @@ brokers =
 
 config :kafka_ex, brokers: brokers
 
+# Target topic that processed messages are (stub-)published to.
+target_topic = System.get_env("KAFKA_TARGET_TOPIC", "device-telemetry-processed")
+
 config :kafka_telemetry_logger,
   topic: topic,
   consumer_group: consumer_group,
-  auto_offset_reset: start_from
+  auto_offset_reset: start_from,
+  target_topic: target_topic

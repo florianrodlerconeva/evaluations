@@ -1,22 +1,54 @@
 # kafka_telemetry_logger
 
-A small Elixir application that consumes messages from the device telemetry
-Kafka topic using [`kafka_ex`](https://kafka-ex.hexdocs.pm/) and logs the
-**headers** and **payload** of every message.
+An Elixir application that consumes messages from the device telemetry Kafka
+topic using [`kafka_ex`](https://kafka-ex.hexdocs.pm/), processes them through a
+[Broadway](https://hexdocs.pm/broadway) pipeline that logs each message's
+**headers** and **payload**, and publishes them to a target topic. Source
+offsets are committed only after a batch has been fully processed and published.
 
-It is the streaming/logging counterpart to the marimo notebook
-`ops/display-kafka-device-telemetry-topic.py`: it connects to the same dev
-cluster, reads the same topic, and applies the same header-decoding strategy —
-but instead of rendering a table, it just logs each message continuously.
+It reads the same topic as the marimo notebook
+`ops/display-kafka-device-telemetry-topic.py` and applies the same
+header-decoding strategy.
 
-## What it does
+## Architecture
 
-- Starts a `KafkaEx.Consumer.ConsumerGroup` with an **ephemeral consumer group**
-  (random suffix) so it never interferes with real consumers and always gets a
-  clean, uncommitted read.
-- Consumes from the beginning of the topic (`auto_offset_reset: :earliest`).
-- For each message, logs `partition`, `offset`, decoded `headers`, and the
-  decoded `payload`.
+`kafka_ex` is push-based (it invokes `handle_message_set/2`), while Broadway is a
+demand-driven GenStage pipeline. This app bridges the two and lets Broadway drive
+the offset commits:
+
+```
+KafkaEx GenConsumer ──deliver batch (ref)──▶ Producer (GenStage)
+   (blocks on ref)                              │ emits Broadway.Message
+        ▲                                       ▼
+        │                              processors  ──▶ handle_message  (log headers + payload)
+        │                                       │
+        │                              batcher    ──▶ handle_batch ──▶ TargetProducer.publish (stub)
+        │                                       │ ack(success / fail)
+        └──{:batch_complete, ref, :ok|:error}◀──┘  (custom Acknowledger)
+   sync_commit on :ok  /  raise → reprocess on :error
+```
+
+- **`KafkaTelemetryLogger.TelemetryConsumer`** — the `KafkaEx.Consumer.GenConsumer`.
+  On each fetched batch it hands the messages to the Broadway producer (tagged
+  with a unique `ref`) and **blocks** until Broadway acknowledges the whole
+  batch. On success it returns `{:sync_commit, state}`; on failure it raises, so
+  offsets are *not* committed and the batch is re-fetched (let-it-crash). This
+  blocking also gives natural backpressure.
+- **`KafkaTelemetryLogger.Producer`** — a custom GenStage producer (not
+  `broadway_kafka`). It buffers each delivered batch, emits `Broadway.Message`s
+  on demand, tracks per-`ref` completion, and notifies the consumer with
+  `{:batch_complete, ref, :ok | :error}` once every message in the batch is acked.
+- **`KafkaTelemetryLogger.Acknowledger`** — a `Broadway.Acknowledger` that routes
+  per-message ack results back to the producer.
+- **`KafkaTelemetryLogger.Pipeline`** — the `Broadway` pipeline. `handle_message/3`
+  logs headers + payload; `handle_batch/4` publishes the batch via the target
+  producer.
+- **`KafkaTelemetryLogger.TargetProducer`** — a **stub** that pretends to publish
+  to the target Kafka topic (it just logs and returns `:ok`; it does not talk to
+  Kafka). Replace `publish/1` with a real producer to make it live.
+
+The KafkaEx consumer group uses an **ephemeral consumer group** (random suffix)
+and reads from the beginning of the topic (`auto_offset_reset: :earliest`).
 
 Header/value decoding (`KafkaTelemetryLogger.Decoder`) mirrors the notebook:
 
@@ -53,11 +85,15 @@ mix run --no-halt
 You should see log lines like:
 
 ```
-12:00:20.550 [info] Starting device telemetry consumer: topic=event-hub-device-telemetry-evh-cev-dev-device-telemetry group=kafka-telemetry-logger-4ece202b start_from=earliest
-12:00:21.100 [info] Kafka message [partition=3 offset=142857]
-  headers: message_type=telemetry, tenant=acme, iothub-enqueuedtime=g...==
-  payload: {"deviceId":"...","measurements":[...]}
+12:31:46.954 [info] Starting device telemetry consumer: topic=event-hub-device-telemetry-evh-cev-dev-device-telemetry group=kafka-telemetry-logger-6adcee67 start_from=earliest
+12:31:50.768 [info] Kafka message [partition=0 offset=65350]
+  headers: message_type=charger_report:v1.0.0, device_id=coneva-de-munich-80336-005, iothub-enqueuedtime=gwAAAZ8AYbIW, ...
+  payload: {"report:charger:active:energy:+":[...]}
+12:31:51.771 [info] [target-producer stub] published 26 message(s) to device-telemetry-processed
 ```
+
+(`iothub-enqueuedtime` is a binary timestamp header, so it shows up base64-encoded
+— matching the notebook.)
 
 ## Configuration
 
@@ -104,17 +140,36 @@ restart kubefwd so it forwards all broker pods.
 
 ## Tests
 
-The decoder logic is covered by unit tests (no broker required):
+The decoder logic and the Broadway pipeline (including the commit-on-success and
+no-commit-on-failure paths) are covered by tests that need no broker:
 
 ```sh
 mix test
 ```
 
+The pipeline tests drive the real Broadway topology by delivering batches to the
+producer and asserting on the `{:batch_complete, ref, :ok | :error}` signal that
+gates the source-offset commit.
+
+## Configuration (target topic)
+
+| Variable             | Default                      | Description                          |
+| -------------------- | ---------------------------- | ------------------------------------ |
+| `KAFKA_TARGET_TOPIC` | `device-telemetry-processed` | Topic the (stub) publisher targets   |
+
 ## Layout
 
 - `lib/kafka_telemetry_logger/application.ex` — supervision tree; starts the
-  consumer group.
-- `lib/kafka_telemetry_logger/telemetry_consumer.ex` — `GenConsumer` that logs
-  each message's headers and payload.
+  Broadway pipeline and then the KafkaEx consumer group.
+- `lib/kafka_telemetry_logger/telemetry_consumer.ex` — `GenConsumer` that feeds
+  batches into Broadway and commits offsets once Broadway acknowledges them.
+- `lib/kafka_telemetry_logger/producer.ex` — GenStage producer bridging KafkaEx
+  into Broadway.
+- `lib/kafka_telemetry_logger/acknowledger.ex` — `Broadway.Acknowledger` routing
+  acks back to the producer.
+- `lib/kafka_telemetry_logger/pipeline.ex` — Broadway pipeline: logs headers +
+  payload and publishes to the target topic.
+- `lib/kafka_telemetry_logger/target_producer.ex` — stub publisher for the target
+  topic.
 - `lib/kafka_telemetry_logger/decoder.ex` — value/header decoding.
 - `config/runtime.exs` — connection settings and env-var overrides.
