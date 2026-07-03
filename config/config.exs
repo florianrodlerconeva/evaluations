@@ -24,4 +24,14 @@ config :kafka_ex,
 # off in test so the suite does not require a live broker.
 config :kafka_telemetry_logger, start_consumer: true
 
+# Broadway pipeline tuning. Multiple KafkaEx consumers (one per assigned
+# partition) feed a single producer; downstream parallelism is governed by
+# these stage concurrencies, and `partition_by` keeps per-partition ordering.
+# Raise the concurrencies to scale throughput with your partition count.
+config :kafka_telemetry_logger, KafkaTelemetryLogger.Pipeline,
+  processor_concurrency: 4,
+  batcher_concurrency: 2,
+  batch_size: 100,
+  batch_timeout: 1_000
+
 import_config "#{config_env()}.exs"

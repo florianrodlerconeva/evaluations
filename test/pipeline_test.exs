@@ -21,7 +21,7 @@ defmodule KafkaTelemetryLogger.PipelineTest do
   defp record(offset, opts \\ []) do
     %Record{
       topic: "telemetry",
-      partition: 0,
+      partition: Keyword.get(opts, :partition, 0),
       offset: offset,
       key: Keyword.get(opts, :key, "device-#{offset}"),
       value: Keyword.get(opts, :value, ~s({"offset":#{offset}})),
@@ -67,5 +67,18 @@ defmodule KafkaTelemetryLogger.PipelineTest do
 
     assert_receive {:batch_complete, ^ref_a, :ok}, 5_000
     assert_receive {:batch_complete, ^ref_b, :ok}, 5_000
+  end
+
+  test "batches from multiple partitions (parallel consumers) complete independently" do
+    # Simulates two KafkaEx partition consumers delivering at the same time,
+    # each with its own ref and caller (here, the test process).
+    ref_p0 = make_ref()
+    ref_p1 = make_ref()
+
+    Producer.deliver([record(100, partition: 0), record(101, partition: 0)], ref_p0, self())
+    Producer.deliver([record(200, partition: 1), record(201, partition: 1)], ref_p1, self())
+
+    assert_receive {:batch_complete, ^ref_p0, :ok}, 5_000
+    assert_receive {:batch_complete, ^ref_p1, :ok}, 5_000
   end
 end

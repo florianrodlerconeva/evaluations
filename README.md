@@ -50,6 +50,32 @@ KafkaEx GenConsumer ──deliver batch (ref)──▶ Producer (GenStage)
 The KafkaEx consumer group uses an **ephemeral consumer group** (random suffix)
 and reads from the beginning of the topic (`auto_offset_reset: :earliest`).
 
+### Parallelism & ordering
+
+`KafkaEx.Consumer.ConsumerGroup` starts **one `GenConsumer` per assigned
+partition**, so partitions are fetched in parallel (and spread across nodes if
+you run the same group on several BEAM instances). Each consumer delivers to the
+**single** Broadway producer with its own `ref`/caller, so per-`ref` completion
+tracking and offset commits stay independent and correct across consumers.
+
+Downstream throughput is governed by the Broadway stage concurrency, not the
+partition count — tune it via config (defaults shown):
+
+```elixir
+config :kafka_telemetry_logger, KafkaTelemetryLogger.Pipeline,
+  processor_concurrency: 4,
+  batcher_concurrency: 2,
+  batch_size: 100,
+  batch_timeout: 1_000
+```
+
+The pipeline sets `partition_by: &(&1.metadata.partition)` at the root, so each
+source Kafka partition is pinned to a consistent processor and batcher —
+**ordering within a partition is preserved** while different partitions run in
+parallel. Keep the **producer at `concurrency: 1`** (scale processors/batchers
+instead); `Producer.deliver/3` matches a single producer name strictly and will
+crash loudly if that invariant is broken.
+
 Header/value decoding (`KafkaTelemetryLogger.Decoder`) mirrors the notebook:
 
 1. **UTF-8** — the common case.

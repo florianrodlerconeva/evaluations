@@ -21,20 +21,41 @@ defmodule KafkaTelemetryLogger.Pipeline do
   alias KafkaTelemetryLogger.{Decoder, Producer, TargetProducer}
 
   def start_link(_opts) do
+    config = Application.get_env(:kafka_telemetry_logger, __MODULE__, [])
+    processor_concurrency = Keyword.get(config, :processor_concurrency, 4)
+    batcher_concurrency = Keyword.get(config, :batcher_concurrency, 2)
+    batch_size = Keyword.get(config, :batch_size, 100)
+    batch_timeout = Keyword.get(config, :batch_timeout, 1_000)
+
     Broadway.start_link(__MODULE__,
       name: __MODULE__,
+      # Keep the producer at concurrency 1. All KafkaEx partition consumers
+      # deliver to a single named producer (see `Producer.deliver/3`); to add
+      # parallelism scale the processors/batchers below, NOT the producer.
       producer: [
         module: {Producer, []},
         concurrency: 1
       ],
+      # Route each source Kafka partition to a consistent processor and batcher
+      # so message ordering *within* a partition is preserved even though
+      # multiple partitions are processed in parallel.
+      partition_by: &partition_of/1,
       processors: [
-        default: [concurrency: 2]
+        default: [concurrency: processor_concurrency]
       ],
       batchers: [
-        default: [concurrency: 1, batch_size: 100, batch_timeout: 1_000]
+        default: [
+          concurrency: batcher_concurrency,
+          batch_size: batch_size,
+          batch_timeout: batch_timeout
+        ]
       ]
     )
   end
+
+  # Partitioning key: the source Kafka partition. `phash2(partition) rem
+  # concurrency` then maps each partition to a fixed processor/batcher.
+  defp partition_of(%Message{metadata: %{partition: partition}}), do: partition
 
   @impl true
   def handle_message(_processor, %Message{data: record} = message, _context) do

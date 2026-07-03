@@ -32,7 +32,13 @@ defmodule KafkaTelemetryLogger.Producer do
   """
   @spec deliver([KafkaEx.Messages.Fetch.Record.t()], reference(), pid()) :: :ok
   def deliver(records, ref, caller) do
-    [producer | _] = Broadway.producer_names(Pipeline)
+    # The pipeline runs a single producer (concurrency: 1), so there is exactly
+    # one name. This is matched strictly on purpose: if someone raises the
+    # producer concurrency, this crashes loudly here instead of silently
+    # delivering every batch to only the first producer and starving the rest.
+    # To scale throughput, raise the processor/batcher concurrency in Pipeline
+    # instead (or change this to route batches across producers by partition).
+    [producer] = Broadway.producer_names(Pipeline)
     GenStage.cast(producer, {:deliver, records, ref, caller})
   end
 
